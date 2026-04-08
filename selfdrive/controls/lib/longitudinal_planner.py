@@ -65,8 +65,62 @@ class Planner:
     else:
       v_cruise_kph = sm['controlsState'].vCruise
     v_cruise_kph = min(v_cruise_kph, V_CRUISE_MAX)
-    v_cruise = v_cruise_kph * CV.KPH_TO_MS
+# --- 수정된 통합 비전 기반 감속 로직 시작 ---
+    if len(sm['modelV2'].leadsV3) > 0:
+        lead_v3 = sm['modelV2'].leadsV3[0]
+        v_ego = sm['carState'].vEgo
+        v_ego_kph = v_ego * 3.6
 
+        # 1. 비전 확률 60% 이상 시 작동
+        if lead_v3.prob > 0.6:
+            d_rel = lead_v3.x[0]
+            v_rel = lead_v3.v[0]
+
+            # [상황 A] 시속 50km/h 이상 고속 주행 시
+            if v_ego_kph >= 50:
+                # 초장거리 대응 (120m~250m) & 상대속도 18km/h 이상 차이 시
+                if 120 < d_rel <= 250 and v_rel < -5.0:
+                    v_cruise_kph = max(v_cruise_kph - 5, 30)
+                
+                # 장거리 적극 대응 (100m 이내) & 상대속도 12km/h 이상 차이 시
+                elif d_rel <= 100 and v_rel < -(12.0 / 3.6):
+                    v_cruise_kph = max(v_cruise_kph - 15, 30)
+
+            # [상황 B] 단거리 정지차 대응 (확률 70% 이상, 40m 이내)
+            if lead_v3.prob > 0.7 and d_rel < 40 and v_rel < -5.0:
+                v_cruise_kph = max(v_cruise_kph - 20, 30)
+
+    # --- 통합 로직 끝 ---
+# --- 초록불 감지 시 출발 지원 로직 (실험적) ---
+    # 차가 정지 상태(v_ego < 0.1)일 때만 작동
+    if v_ego < 0.1 and len(sm['modelV2'].trafficLights) > 0:
+        tl = sm['modelV2'].trafficLights[0]  # 가장 확률 높은 신호등 데이터
+        
+        # 1. 초록불일 확률이 90% 이상이고
+        # 2. 빨간불 확률이 10% 미만이며
+        # 3. 좌회전 화살표 확률이 10% 미만일 때 (좌회전 신호 필터링)
+        if tl.state == 3 and tl.prob > 0.9:
+            # 브랜치 모델에 따라 redProb, leftArrowProb 변수명이 다를 수 있음
+            # 일반적인 콤마 모델 기준의 필터링 로직
+            is_pure_green = True 
+            
+            # 좌회전 신호(빨간불+화살표)를 거르기 위한 이중 체크
+            if hasattr(tl, 'redProb') and tl.redProb > 0.1:
+                is_pure_green = False
+            if hasattr(tl, 'leftArrowProb') and tl.leftArrowProb > 0.1:
+                is_pure_green = False
+
+            if is_pure_green:
+                # [액션 1] 크루즈 설정 속도를 현재 속도보다 높게 설정하여 출발 대기
+                v_cruise_kph = max(v_cruise_kph, 30)
+                
+                # [액션 2] 앞차와의 가상 거리를 벌려 SCC가 출발하도록 유도 (매우 실험적)
+                # 실제 물리적 출발은 현대차 SCC 특성상 RES 버튼이나 가속 페달이 필요할 수 있음
+                # 우선 v_cruise를 띄워 '준비' 상태로 만듭니다.
+                v_cruise = v_cruise_kph * CV.KPH_TO_MS
+    # --- 초록불 로직 끝 ---
+
+    
     long_control_state = sm['controlsState'].longControlState
     force_slow_decel = sm['controlsState'].forceDecel
 
